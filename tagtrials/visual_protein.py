@@ -1,4 +1,13 @@
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2021 CSIRO
+#  +Author Bo Yan
+#  +Email bo.yan@csiro.au
+# Licensed under the MIT License
+
+
 import requests
+from datetime import datetime
 
 cathdb_url = 'http://www.cathdb.info/version/v4_3_0/api/rest/uniprot_to_funfam/'
 
@@ -112,8 +121,7 @@ def generate_protein_visual_data(trial_tags, doc, context):
     # start dumping data to v_data
     u_obj = {"name": 'unknown', "children": []}
     v_data = {"name": "statistics", "children": [u_obj]}
-    v_data['file']='protein_cath.json'
-    v_data['timestamp']= datetime.now()
+    v_data['timestamp']= datetime.now().strftime("%d/%m/%Y, %H:%M:%S")
     for cath in cath_p_map.keys():
         if cath == 'unknown':
             for leaf in cath_p_map[cath]:
