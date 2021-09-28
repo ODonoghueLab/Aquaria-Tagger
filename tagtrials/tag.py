@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2021 CSIRO
+#  +Author Bo Yan
+#  +Email bo.yan@csiro.au
+# Licensed under the MIT License
+
 import schedule
 import time
 import configparser
@@ -6,13 +13,13 @@ import json
 import sys
 import traceback
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from itertools import chain
+
+from visual import generate_visual_data 
 
 from pymongo import MongoClient
 from bson.objectid import ObjectId
-
-from visual import generate_visual_data 
 
 CONFIG_SECTION = 'App'
 STAT_COLLECTION = 'stat'
@@ -21,8 +28,8 @@ TRIAL_ELEMENTS = ['briefTitle', 'studyDesign', 'briefSummary', 'officialTitle', 
 
 TOTAL_IDENTIFIERS = 'total_tags'
 
+
 def main():
-    # read configuration
     config = read_config()
     db = get_db(config)
     t_c_name = config.get(CONFIG_SECTION, 'mongodb_trialcollection')
@@ -32,17 +39,16 @@ def main():
     # get all the collection
     trial_collection = db[t_c_name]
     stat_collection = db[STAT_COLLECTION]
-    cath_collection = db['cathid']
-    cluster_collection = db['keycluster']
-    visualfile_collection = db['visualfile']
     # load protein dictionaries
     protein_dict = db['entitydictionary'].find_one()['dictionary']
-    cath_cluster = {'name':'protein' 'dict': cath_dict, 'timestamp': datetime.now()}
     cath_dict = {}
     
     context = {'protein_dict': protein_dict, 'cath_dict': cath_dict, \
                 'stat_collection': stat_collection, \
-                'visualfile_collection': visualfile_collection }
+                'pubchem_mapping': load_pubchem_mapping(db), \
+                'chembl_dict_collection' : db['chembl_dict'], \
+                'pubchem_cluster' : db['chemical_cluster'].find_one({'name': 'pubchem_cluster'})['data'], \
+                'config': config }
 
     if tag_interval <= 0 :
         tag_interval = 5
@@ -223,6 +229,33 @@ def get_all_trial_id(collection):
         ctids.append(doc['ctid'])
     return ctids
 
+def prep_timeline_list():
+    timelines = []
+    start = date.fromisoformat('2019-12-01')
+    todayDate = datetime.date(datetime.now())
+    latest = todayDate.replace(day=1)
+    while start < latest:
+        end = (start + timedelta(days=31)).replace(day = 1)
+        if end <= latest:
+            timelines.append({'start': start, 'end': end, 'trials':[]})
+        start = end        
+    return timelines
+
+def load_trial_timeline(trial_collection):
+    timelines = prep_timeline_list() 
+    # [ { 'start': 2019-12-01, 'end': 2020-01-01, 'trials':[] } ]
+    tagdocs = []
+    trialfields = {'ctid': True, 'untagged.firstSubmittedDate': True, \
+        'untagged.firstPostedDate' : True, 'chembl_key': True, 'pdb_key': True, \
+        'primary_accession': True, 'pubchem_cid': True, '_id': False}
+    for doc in trial_collection.find(filter=None, projection=trialfields ):
+        doc['submitted'] =  datetime.strptime(doc['untagged']['firstSubmittedDate'], '%B %d, %Y').date()
+        tagdocs.append(doc)
+    for period in timelines:
+        period['trials'] = [x for x in tagdocs if period['end'] > x['submitted'] >= period['start']]
+    # [ { 'start': 2019-12-01, 'end': 2020-01-01, 'trials':[{'ctid': 'id': 'chembl_key': [], 'pdb_key': [],}] } ]
+    return timelines
+
 def do_tag(trial_collection, tag_service_url, context):
     try:
         tag_updated = tag(trial_collection, tag_service_url)
@@ -231,7 +264,7 @@ def do_tag(trial_collection, tag_service_url, context):
     try:
         if tag_updated:
             stat, trial_tags = update_statistics(trial_collection, context['stat_collection'] )
-            #context = {'protein_dict': protein_dict, 'cath_dict': cath_dict, 'stat_collection': stat_collection}
+            context['trial_timeline'] = load_trial_timeline(trial_collection)
             generate_visual_data(trial_tags, context)
         else:
             print (f'There is no update of tags.')
@@ -300,6 +333,7 @@ trial_tags :
 '''
 def generate_stats(trial_tags, stat_collection, total_words):
     doc_count = len(trial_tags)
+    # grouping
     stats = []
     for doc_tags in trial_tags:
         for t_dict in doc_tags:
@@ -318,6 +352,7 @@ def generate_stats(trial_tags, stat_collection, total_words):
             stats_dict['mentioned'].extend( mentioned )    
     # start aggregating
     for stats_dict in stats:
+        # words stat
         stat = {'total_trials': doc_count, 'total_words' : total_words}
         stat['total_tagged_words'] = len(stats_dict['words'])
         dist_words = set({v.casefold(): v for v in stats_dict['words']}.values()) 
@@ -326,6 +361,7 @@ def generate_stats(trial_tags, stat_collection, total_words):
             stat['average_tagged_words_per_trial'] = float(len(stats_dict['words'])) / doc_count
             stat['average_distinct_tagged_words_per_trial'] = float(len(dist_words)) / doc_count
         stat['top200_tagged_words'] =  Counter(stats_dict['words']).most_common(TOP_NUMBER) 
+        # identifier stat
         stat[TOTAL_IDENTIFIERS] = len(stats_dict['identifiers'])
         dist_identifiers = set (stats_dict['identifiers'])
         stat['distinct_identifiers'] = len(dist_identifiers)
@@ -359,6 +395,13 @@ def update_statistics(trial_collection, stat_collection):
         total_words += word_count
     print (f'end updating statistics.')
     return generate_stats(trial_tags, stat_collection, total_words), trial_tags
+
+def load_pubchem_mapping(db):
+    mapping = {}
+    for record in db['chemical_cluster'].find({'name': 'chembl2pubchem'}):
+        sub = record['data']
+        mapping = {**mapping, **sub}
+    return mapping
 
 def get_db(config):
     uri = config.get(CONFIG_SECTION, 'mongodb_uri')
